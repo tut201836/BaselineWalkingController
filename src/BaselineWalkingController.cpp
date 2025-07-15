@@ -21,16 +21,17 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
                                                      bool allowEmptyManager)
 : mc_control::fsm::Controller(rm, dt, _config)
 {
-  // Get the robot-specific configuration
+  // ロボット固有の設定を取得
   auto rconfig = config()("robots")(robot().module().name);
   if(rconfig.empty())
   {
     mc_rtc::log::error_and_throw("[BaselineWalkingController] {} section is empty, please provide a configuration",
                                  robot().module().name);
   }
-  // Load the robot's configuration into the controller's configuration
+  // 設定を読み込み
   config().load(rconfig);
-  // Load extra-overwrites
+
+  // 追加の上書き設定を読み込み
   auto overwriteConfigList = config()("OverwriteConfigList", mc_rtc::Configuration());
   auto overwriteConfigKeys = config()("OverwriteConfigKeys", std::vector<std::string>{});
   for(const auto & overwriteConfigKey : overwriteConfigKeys)
@@ -45,7 +46,7 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
 
   config()("controllerName", name_);
 
-  // Setup tasks
+  // CoMタスクのセットアップ
   if(config().has("CoMTask"))
   {
     comTask_ = mc_tasks::MetaTaskLoader::load<mc_tasks::CoMTask>(solver(), config()("CoMTask"));
@@ -55,6 +56,8 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
   {
     mc_rtc::log::warning("[BaselineWalkingController] CoMTask configuration is missing.");
   }
+
+  // 基底姿勢タスクのセットアップ
   if(config().has("BaseOrientationTask"))
   {
     baseOriTask_ = mc_tasks::MetaTaskLoader::load<mc_tasks::OrientationTask>(solver(), config()("BaseOrientationTask"));
@@ -64,6 +67,8 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
   {
     mc_rtc::log::warning("[BaselineWalkingController] BaseOrientationTask configuration is missing.");
   }
+
+  // 足タスクのセットアップ
   if(config().has("FootTaskList"))
   {
     for(const auto & footTaskConfig : config()("FootTaskList"))
@@ -79,7 +84,7 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
     mc_rtc::log::warning("[BaselineWalkingController] FootTaskList configuration is missing.");
   }
 
-  // Setup managers
+  // FootManagerのセットアップ
   if(config().has("FootManager"))
   {
     footManager_ = std::make_shared<FootManager>(this, config()("FootManager"));
@@ -88,6 +93,8 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
   {
     mc_rtc::log::warning("[BaselineWalkingController] FootManager configuration is missing.");
   }
+
+  // CentroidalManagerのセットアップ
   if(config().has("CentroidalManager"))
   {
     std::string centroidalManagerMethod = config()("CentroidalManager")("method", std::string(""));
@@ -122,7 +129,7 @@ BaselineWalkingController::BaselineWalkingController(mc_rbdyn::RobotModulePtr rm
     mc_rtc::log::warning("[BaselineWalkingController] CentroidalManager configuration is missing.");
   }
 
-  // Setup anchor
+  // デフォルトアンカーのセット
   setDefaultAnchor();
 
   mc_rtc::log::success("[BaselineWalkingController] Constructed.");
@@ -134,7 +141,7 @@ void BaselineWalkingController::reset(const mc_control::ControllerResetData & re
 
   enableManagerUpdate_ = false;
 
-  // Print message to set priority
+  // スレッドIDを取得し、優先度変更方法を表示
   long tid = static_cast<long>(syscall(SYS_gettid));
   mc_rtc::log::info("[BaselineWalkingController] TID is {}. Run the following command to set high priority:\n  sudo "
                     "renice -n -20 -p {}",
@@ -151,7 +158,7 @@ bool BaselineWalkingController::run()
 
   if(enableManagerUpdate_)
   {
-    // Update managers
+    // 各マネージャを更新
     footManager_->update();
     centroidalManager_->update();
   }
@@ -161,7 +168,7 @@ bool BaselineWalkingController::run()
 
 void BaselineWalkingController::stop()
 {
-  // Clean up tasks
+  // 各タスクを削除
   solver().removeTask(comTask_);
   solver().removeTask(baseOriTask_);
   for(const auto & foot : Feet::Both)
@@ -169,11 +176,11 @@ void BaselineWalkingController::stop()
     solver().removeTask(footTasks_.at(foot));
   }
 
-  // Clean up managers
+  // 各マネージャを停止
   footManager_->stop();
   centroidalManager_->stop();
 
-  // Clean up anchor
+  // デフォルトアンカーに戻す
   setDefaultAnchor();
 
   mc_control::fsm::Controller::stop();
@@ -181,6 +188,7 @@ void BaselineWalkingController::stop()
 
 void BaselineWalkingController::setDefaultAnchor()
 {
+  // 左右足の中点をアンカーとする
   std::string anchorName = "KinematicAnchorFrame::" + robot().name();
   if(datastore().has(anchorName))
   {

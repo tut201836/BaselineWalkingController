@@ -113,6 +113,9 @@ public:
     //! Configuration for wrench distribution
     mc_rtc::Configuration wrenchDistConfig;
 
+    double floorSpringK;
+    double floorDampingD;
+
     //! Configuration for DCM estimator
     DcmEstimatorConfiguration dcmEstimatorConfig;
 
@@ -170,6 +173,11 @@ public:
 
   /** \brief Set anchor frame. */
   void setAnchorFrame();
+
+  /** \brief Set floor deff */
+  double compliantFloorCorrection(double footSurfaceZDiff) const;
+
+  double getFootSurfaceDiff() const;
 
 protected:
   /** \brief Const accessor to the controller. */
