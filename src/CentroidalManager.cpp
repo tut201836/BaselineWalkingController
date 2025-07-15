@@ -19,22 +19,7 @@
 
 using namespace BWC;
 
-
-// Debug用csv
-std::ofstream comZLogFile;
-
 bool isDangerFloor = false;
-
-void openLogFile()
-{
-  comZLogFile.open("log_comz_feedback.csv", std::ios::out);
-  comZLogFile << "Time,contactCount,footSurfaceZDiff\n"; // ヘッダ
-}
-
-void closeLogFile()
-{
-  comZLogFile.close();
-}
 
 void CentroidalManager::DcmEstimatorConfiguration::load(const mc_rtc::Configuration & mcRtcConfig)
 {
@@ -79,7 +64,6 @@ CentroidalManager::CentroidalManager(BaselineWalkingController * ctlPtr, const m
                                      )
 : ctlPtr_(ctlPtr), refComZFunc_(std::make_shared<TrajColl::CubicInterpolator<double>>())
 {
-  openLogFile();
 }
 
 void CentroidalManager::reset()
@@ -194,27 +178,16 @@ void CentroidalManager::update()
       controlZmp_.head<2>() += config().dcmGainP * dcmError.head<2>();
     }
 
+    // 両足指示期のときのz軸方向の差 (片足のときは0を返す)
+    double footSurfaceDiff = getfootSurfaceDiff();
+
     // Apply ForceZ feedback
     if(config().enableComZFeedback)
-    {
-      double footSurfaceZDiff = 0.0;
-      int contactCount = 0;
-
-      // Get contact feet
-      contactCount = static_cast<int>(ctl().footManager_->getCurrentContactFeet().size());
-
-      // Is Robot on two feet?
-      if(contactCount == 2)
-      {
-        const auto & leftSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Left));
-        const auto & rightSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Right));
-        footSurfaceZDiff = std::abs(leftSurfacePose.translation().z() - rightSurfacePose.translation().z());
-      }
-
+    { 
       double plannedComZ = ctl().comTask_->com().z();
       double actualComZ = actualCom().z();
-      double plannedComZ_rel = plannedComZ - footSurfaceZDiff;
-      double actualComZ_rel = actualComZ - footSurfaceZDiff;
+      double plannedComZ_rel = plannedComZ - footSurfaceDiff;
+      double actualComZ_rel = actualComZ - footSurfaceDiff;
 
       double plannedComVelZ = ctl().comTask_->refVel().z();
       double actualComVelZ = ctl().realRobot().comVelocity().z();
@@ -222,8 +195,7 @@ void CentroidalManager::update()
       controlForceZ_ -= config().comZGainP * (actualComZ_rel - plannedComZ_rel)
                       + config().comZGainD * (actualComVelZ - plannedComVelZ);
 
-      double currentTime = ctl().t(); // 時間ステップ
-      comZLogFile << currentTime << "," << contactCount << "," << footSurfaceZDiff << "\n";
+      controlForceZ_ += robotMass_ * compliantFloorCorrection(footSurfaceDiff);
     }
 
     // Convert ZMP to wrench and distribute
@@ -248,14 +220,12 @@ void CentroidalManager::update()
         mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
     Eigen::Vector3d nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
 
-    // 両足指示期のときのz軸方向の差 (片足のときは0を返す)
-    double footSurfaceDiff = getFootSurfaceDiff();
-    
+    double footSurfaceDiff = getfootSurfaceDiff();
+        
     // 沈む床を踏んだとき
     if (footSurfaceDiff > 0.008 || isDangerFloor == true)
     {
       isDangerFloor = true;
-      mc_rtc::log::warning("[CentroidalManager] footSurfaceDiff : {}", footSurfaceDiff);
       if(isConstantComZ())
       {
         plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
@@ -319,7 +289,6 @@ void CentroidalManager::update()
 
 void CentroidalManager::stop()
 {
-  closeLogFile();
   removeFromGUI(*ctl().gui());
   removeFromLogger(ctl().logger());
 }
@@ -570,9 +539,9 @@ double CentroidalManager::calcRefComZ(double t, int derivOrder) const
   }
 }
 
-double CentroidalManager::getFootSurfaceDiff() const
+double CentroidalManager::getfootSurfaceDiff() const
 {
-  double footSurfaceZDiff = 0.0;
+  double footSurfaceDiff = 0.0;
   int contactCount = 0;
 
   // Get contact feet
@@ -583,19 +552,19 @@ double CentroidalManager::getFootSurfaceDiff() const
   {
     const auto & leftSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Left));
     const auto & rightSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Right));
-    footSurfaceZDiff = std::abs(leftSurfacePose.translation().z() - rightSurfacePose.translation().z());
-    return footSurfaceZDiff;
+    footSurfaceDiff = std::abs(leftSurfacePose.translation().z() - rightSurfacePose.translation().z());
+    return footSurfaceDiff;
   }
 
   return 0.0;
 }
 
-double CentroidalManager::compliantFloorCorrection(double footSurfaceZDiff) const
+double CentroidalManager::compliantFloorCorrection(double footSurfaceDiff) const
 {
   double comZ = actualCom().z();                         // 実際のCoM高さ
   double comVelZ = ctl().realRobot().comVelocity().z();  // CoM速度Z
 
-  double relZ = comZ - footSurfaceZDiff;       // 床からの相対位置
+  double relZ = comZ - footSurfaceDiff;       // 床からの相対位置
   double relVelZ = comVelZ;
 
   // 床の物理定数

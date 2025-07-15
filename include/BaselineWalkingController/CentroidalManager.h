@@ -177,7 +177,7 @@ public:
   /** \brief Set floor deff */
   double compliantFloorCorrection(double footSurfaceZDiff) const;
 
-  double getFootSurfaceDiff() const;
+  double getfootSurfaceDiff() const;
 
 protected:
   /** \brief Const accessor to the controller. */
