@@ -165,6 +165,9 @@ void FootManager::reset()
   for(const auto & foot : Feet::Both)
   {
     impGainTypes_.emplace(foot, "DoubleSupport");
+
+    // init landing Z offsets
+    landingZOffset_.at(foot) = 0.0;
   }
 
   requireImpGainUpdate_ = true;
@@ -178,6 +181,14 @@ void FootManager::reset()
           postureTask->posture()[ctl().robot().jointIndexByName(jointAngleKV.first)];
     }
   }
+
+  // 追加：世界基準Zを記録
+  worldGroundZ0_ = refGroundPosZ;
+
+  groundPosZFunc_->clearPoints();
+  groundPosZFunc_->appendPoint(std::make_pair(ctl().t(), refGroundPosZ));
+  groundPosZFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, refGroundPosZ));
+  groundPosZFunc_->calcCoeff();
 }
 
 void FootManager::update()
@@ -768,12 +779,27 @@ void FootManager::updateFootTraj()
       {
         const sva::PTransformd & swingStartPose = ctl().robot().surfacePose(surfaceName(swingFootstep_->foot));
         sva::PTransformd swingEndPose = swingFootstep_->pose;
+
+        // 終端ポーズ補正
+        auto &p = swingEndPose.translation();
+
+        // Z 方向（上正）の補正
+        p.z() += landingZOffset_.at(swingFootstep_->foot);
+
         // 上書き着地姿勢指定時は、前足ステップを参照して終端姿勢を補正
         if(config_.overwriteLandingPose && prevFootstep_)
         {
           sva::PTransformd swingRelPose = swingFootstep_->pose * prevFootstep_->pose.inv();
           swingEndPose.translation() = (swingRelPose * targetFootPoses_.at(prevFootstep_->foot)).translation();
         }
+
+        // --- apply landing offsets to end pose ---
+        {
+          auto & t = swingEndPose.translation();
+          // Z
+          t.z() += landingZOffset_.at(swingFootstep_->foot);
+        }
+
 
         // スイング軌道タイプに応じて生成
         std::string swingTrajType =
@@ -888,6 +914,8 @@ void FootManager::updateFootTraj()
       {
         swingTraj_->touchDown(ctl().t());
       }
+      // --- added: clear offset of the touchdown foot ---
+      this->clearLandingZOffset(swingFootstep_->foot);
     }
 
     // スイング軌道から現在のターゲット姿勢・速度・加速度・ゲインを取得して設定
@@ -912,14 +940,65 @@ void FootManager::updateFootTraj()
       targetFootAccels_.at(swingFootstep_->foot) = sva::MotionVecd::Zero();
       footTaskGains_.at(swingFootstep_->foot) = config_.footTaskGain;
 
-      // 足先終端姿勢の補間器作成
+      // ★ここから追加：DS中に世界基準へzを戻す補間を両足に設定
       {
-        auto trajStartFootPoseFunc = std::make_shared<TrajColl::CubicInterpolator<sva::PTransformd, sva::MotionVecd>>();
-        trajStartFootPoseFunc->appendPoint(std::make_pair(ctl().t(), swingTraj_->endPose_));
-        trajStartFootPoseFunc->appendPoint(std::make_pair(swingFootstep_->transitEndTime, targetFootPoses_.at(swingFootstep_->foot)));
-        trajStartFootPoseFunc->calcCoeff();
-        trajStartFootPoseFuncs_.at(swingFootstep_->foot) = trajStartFootPoseFunc;
+        const double t0 = ctl().t();
+        const double t1 = swingFootstep_->transitEndTime; // DS 終了時刻
+
+        // 現在ターゲットの左右 z と平均
+        double zL0 = targetFootPoses_.at(Foot::Left).translation().z();
+        double zR0 = targetFootPoses_.at(Foot::Right).translation().z();
+        double curMidZ = 0.5 * (zL0 + zR0);
+
+        // 世界基準との差分を左右に0.5ずつ配分（1歩あたりの戻し量に上限）
+        double dz = worldGroundZ0_ - curMidZ;
+        const double dz_limit = 0.015; // 例：±15mm/歩 に制限
+        double dz_each = std::clamp(0.5 * dz, -dz_limit, dz_limit);
+
+        // 左右それぞれ終点 z
+        double zL1 = zL0 + dz_each;
+        double zR1 = zR0 + dz_each;
+
+        // スイング足: 既存の補間器を作る部分を置き換え（終点zだけ z?1 に）
+        {
+          auto pose0 = swingTraj_->endPose_;
+          auto pose1 = targetFootPoses_.at(swingFootstep_->foot);
+          // 現在のターゲットをベースに z 終点を上書き
+          auto p1 = pose1.translation();
+          p1.z() = (swingFootstep_->foot == Foot::Left) ? zL1 : zR1;
+          pose1.translation() = p1;
+
+          auto trajStartFootPoseFunc =
+            std::make_shared<TrajColl::CubicInterpolator<sva::PTransformd, sva::MotionVecd>>();
+          trajStartFootPoseFunc->appendPoint(std::make_pair(t0, pose0));
+          trajStartFootPoseFunc->appendPoint(std::make_pair(t1, pose1));
+          trajStartFootPoseFunc->calcCoeff();
+          trajStartFootPoseFuncs_.at(swingFootstep_->foot) = trajStartFootPoseFunc;
+
+          // DS中のターゲットも一貫させる
+          targetFootPoses_.at(swingFootstep_->foot) = pose1;
+        }
+
+        // 支持足側にも z 復帰用の補間器を設定
+        {
+          Foot support = opposite(swingFootstep_->foot);
+          auto pose0 = targetFootPoses_.at(support);
+          auto pose1 = pose0;
+          auto p = pose1.translation();
+          p.z() = (support == Foot::Left) ? zL1 : zR1;
+          pose1.translation() = p;
+
+          auto trajStartFootPoseFunc =
+            std::make_shared<TrajColl::CubicInterpolator<sva::PTransformd, sva::MotionVecd>>();
+          trajStartFootPoseFunc->appendPoint(std::make_pair(t0, pose0));
+          trajStartFootPoseFunc->appendPoint(std::make_pair(t1, pose1));
+          trajStartFootPoseFunc->calcCoeff();
+          trajStartFootPoseFuncs_.at(support) = trajStartFootPoseFunc;
+
+          targetFootPoses_.at(support) = pose1;
+        }
       }
+      // ★ここまで追加
 
       supportPhase_ = SupportPhase::DoubleSupport;
       swingTraj_.reset();
@@ -928,6 +1007,7 @@ void FootManager::updateFootTraj()
       swingFootstep_ = nullptr;
     }
   }
+
 
   // 足タスクへ現在のターゲットをセット
   for(const auto & foot : Feet::Both)
@@ -1039,6 +1119,13 @@ void FootManager::updateZmpTraj()
   groundPosZFunc_->clearPoints();
   contactFootPosesList_.clear();
 
+  auto groundZ = [this](const std::unordered_map<Foot, sva::PTransformd> & _footPoses) {
+    if(keepWorldGroundBaseline_) { return worldGroundZ0_; }
+    // 従来の足裏平均を使いたい場合
+    return 0.5 * (_footPoses.at(Foot::Left).translation().z()
+                + _footPoses.at(Foot::Right).translation().z());
+  };
+
   // Update trajStartFootPoses_
   for(auto & trajStartFootPoseFuncKV : trajStartFootPoseFuncs_)
   {
@@ -1075,24 +1162,42 @@ void FootManager::updateZmpTraj()
 
     if(ctl().t() <= footstep.swingEndTime)
     {
+      // zmpFunc_->appendPoint(std::make_pair(footstep.transitStartTime, calcZmpWithOffset(footPoses)));
+      // groundPosZFunc_->appendPoint(std::make_pair(footstep.transitStartTime, calcFootMidposZ(footPoses)));
+      // contactFootPosesList_.emplace(footstep.transitStartTime, footPoses);
+
+      // zmpFunc_->appendPoint(std::make_pair(footstep.swingStartTime, supportFootZmp));
+      // groundPosZFunc_->appendPoint(std::make_pair(footstep.swingStartTime, calcFootMidposZ(footPoses)));
+      // contactFootPosesList_.emplace(footstep.swingStartTime, std::unordered_map<Foot, sva::PTransformd>{
+      //                                                            {supportFoot, footPoses.at(supportFoot)}});
+
       zmpFunc_->appendPoint(std::make_pair(footstep.transitStartTime, calcZmpWithOffset(footPoses)));
-      groundPosZFunc_->appendPoint(std::make_pair(footstep.transitStartTime, calcFootMidposZ(footPoses)));
+      groundPosZFunc_->appendPoint(std::make_pair(footstep.transitStartTime, groundZ(footPoses)));
       contactFootPosesList_.emplace(footstep.transitStartTime, footPoses);
 
       zmpFunc_->appendPoint(std::make_pair(footstep.swingStartTime, supportFootZmp));
-      groundPosZFunc_->appendPoint(std::make_pair(footstep.swingStartTime, calcFootMidposZ(footPoses)));
-      contactFootPosesList_.emplace(footstep.swingStartTime, std::unordered_map<Foot, sva::PTransformd>{
-                                                                 {supportFoot, footPoses.at(supportFoot)}});
+      groundPosZFunc_->appendPoint(std::make_pair(footstep.swingStartTime, groundZ(footPoses)));
+      contactFootPosesList_.emplace(footstep.swingStartTime,
+        std::unordered_map<Foot, sva::PTransformd>{{supportFoot, footPoses.at(supportFoot)}});
+      
 
       // Update footPoses
       footPoses.at(footstep.foot) = (footstep.swingStartTime <= ctl().t() ? swingTraj_->endPose_ : footstep.pose);
     }
 
+    // zmpFunc_->appendPoint(std::make_pair(footstep.swingEndTime, supportFootZmp));
+    // groundPosZFunc_->appendPoint(std::make_pair(footstep.swingEndTime, calcFootMidposZ(footPoses)));
+    // contactFootPosesList_.emplace(footstep.swingEndTime, footPoses);
+
+    // groundPosZFunc_->appendPoint(std::make_pair(footstep.transitEndTime, calcFootMidposZ(footPoses)));
+    // zmpFunc_->appendPoint(std::make_pair(footstep.transitEndTime, calcZmpWithOffset(footPoses)));
+    // contactFootPosesList_.emplace(footstep.transitEndTime, footPoses);
+
     zmpFunc_->appendPoint(std::make_pair(footstep.swingEndTime, supportFootZmp));
-    groundPosZFunc_->appendPoint(std::make_pair(footstep.swingEndTime, calcFootMidposZ(footPoses)));
+    groundPosZFunc_->appendPoint(std::make_pair(footstep.swingEndTime, groundZ(footPoses)));
     contactFootPosesList_.emplace(footstep.swingEndTime, footPoses);
 
-    groundPosZFunc_->appendPoint(std::make_pair(footstep.transitEndTime, calcFootMidposZ(footPoses)));
+    groundPosZFunc_->appendPoint(std::make_pair(footstep.transitEndTime, groundZ(footPoses)));
     zmpFunc_->appendPoint(std::make_pair(footstep.transitEndTime, calcZmpWithOffset(footPoses)));
     contactFootPosesList_.emplace(footstep.transitEndTime, footPoses);
 
@@ -1102,11 +1207,17 @@ void FootManager::updateZmpTraj()
     }
   }
 
+  // if(footstepQueue_.empty() || footstepQueue_.back().transitEndTime < ctl().t() + config_.zmpHorizon)
+  // {
+  //   // Set terminal point
+  //   zmpFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, calcZmpWithOffset(footPoses)));
+  //   groundPosZFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, calcFootMidposZ(footPoses)));
+  // }
+
   if(footstepQueue_.empty() || footstepQueue_.back().transitEndTime < ctl().t() + config_.zmpHorizon)
   {
-    // Set terminal point
     zmpFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, calcZmpWithOffset(footPoses)));
-    groundPosZFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, calcFootMidposZ(footPoses)));
+    groundPosZFunc_->appendPoint(std::make_pair(ctl().t() + config_.zmpHorizon, groundZ(footPoses)));
   }
 
   zmpFunc_->calcCoeff();
