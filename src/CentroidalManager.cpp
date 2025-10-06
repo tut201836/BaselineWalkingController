@@ -1,5 +1,4 @@
-#include <RBDyn/Momentum.h> //add
-#include <fstream>
+#include <RBDyn/Momentum.h>
 
 #include <mc_rtc/gui/Button.h>
 #include <mc_rtc/gui/Checkbox.h>
@@ -18,8 +17,6 @@
 #include <BaselineWalkingController/FootManager.h>
 
 using namespace BWC;
-
-bool isDangerFloor = false;
 
 void CentroidalManager::DcmEstimatorConfiguration::load(const mc_rtc::Configuration & mcRtcConfig)
 {
@@ -55,12 +52,6 @@ void CentroidalManager::Configuration::load(const mc_rtc::Configuration & mcRtcC
   mcRtcConfig("useActualComForWrenchDist", useActualComForWrenchDist);
   mcRtcConfig("actualComOffset", actualComOffset);
   mcRtcConfig("wrenchDistConfig", wrenchDistConfig);
-  mcRtcConfig("floorSpringK", floorSpringK);
-  mcRtcConfig("floorDampingD", floorDampingD);
-  mcRtcConfig("sinkOnThreshold", sinkOnThreshold);   // default 0.010
-  mcRtcConfig("sinkOffThreshold", sinkOffThreshold); // default 0.006
-  mcRtcConfig("sinkAlpha", sinkAlpha);               // LPF alpha (0..1), default 0.25
-  mcRtcConfig("sinkAccelScale", sinkAccelScale);     // 既存の 0.001 を置換
   dcmEstimatorConfig.load(mcRtcConfig("dcmEstimator", mc_rtc::Configuration()));
 }
 
@@ -140,7 +131,6 @@ void CentroidalManager::update()
       Eigen::Vector3d actualDcm = actualCom() + ctl().realRobot().comVelocity() / omega;
       Eigen::Vector3d dcmError = actualDcm - plannedDcm;
 
-
       // Estimate and compensate for DCM bias
       if(config().dcmEstimatorConfig.enableDcmEstimator)
       {
@@ -179,20 +169,8 @@ void CentroidalManager::update()
         requireDcmEstimatorReset_ = true;
         dcmEstimator_->setBias(Eigen::Vector2d::Zero());
       }
-      controlZmp_.head<2>() += config().dcmGainP * dcmError.head<2>();
-    }
 
-    // --- added: roll-rate damper to mitigate lateral sway ---
-    {
-      // ベースのロール角速度 ωx を取得（IMU/BodySensor 名は環境に合わせて）
-      // mc_rtc では realRobot().bodySensor() / robot().bodySensor() のどちらかを使用
-      const auto & bs = ctl().realRobot().bodySensor();
-      const double omega_roll = bs.angularVelocity().x(); // [rad/s], +は左肩上がり方向
-      // 係数（初期目安）
-      static const double k_roll_damp = 0.02; // [m / (rad/s)] 0.01〜0.03で調整
-      // ロールが左へ倒れる（ωx>0）時はZMPを左（+y）に寄せる ⇒ 符号は -?
-      // 右手系定義に依るが、多くのモデルで "ZMPをロール速度と逆向きに" が安定
-      controlZmp_.y() += -k_roll_damp * omega_roll;
+      controlZmp_.head<2>() += config().dcmGainP * dcmError.head<2>();
     }
 
     // Apply ForceZ feedback
@@ -227,52 +205,12 @@ void CentroidalManager::update()
     Eigen::Vector3d nextPlannedCom =
         mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
     Eigen::Vector3d nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
-
-    double footSurfaceDiff = estimateSupportSink();
-
-    // LPF＋ヒステリシス
-    config().footSurfaceDiffFilt_ = config().sinkAlpha * footSurfaceDiff
-                                   + (1.0 - config().sinkAlpha) * config().footSurfaceDiffFilt_;
-    if(!config().sinkActive_ && config().footSurfaceDiffFilt_ > config().sinkOnThreshold)  config().sinkActive_ = true;
-    else if(config().sinkActive_ && config().footSurfaceDiffFilt_ < config().sinkOffThreshold) config().sinkActive_ = false;
-    isDangerFloor = config().sinkActive_;
-        
-    // 沈む床を踏んだとき (今は使わない)
-    if (config().sinkActive_)
+    if(isConstantComZ())
     {
-      mc_rtc::log::warning("footSurfaceDiff: {}", footSurfaceDiff);
-      isDangerFloor = true;
-      if(isConstantComZ())
-      {
-        plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
-        // plannedComAccel.z() += 0.001 * compliantFloorCorrection(footSurfaceDiff);
-        plannedComAccel.z() += config().sinkAccelScale
-                         * compliantFloorCorrection(config().footSurfaceDiffFilt_);
-      }
-      nextPlannedCom = mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
-      nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
+      nextPlannedCom.z() = calcRefComZ(ctl().t()) + ctl().footManager_->calcRefGroundPosZ(ctl().t());
+      nextPlannedComVel.z() = calcRefComZ(ctl().t(), 1) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 1);
+      plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
     }
-    // 通常の床
-    else
-    {
-      if(isConstantComZ())
-      {
-        nextPlannedCom.z() = calcRefComZ(ctl().t()) + ctl().footManager_->calcRefGroundPosZ(ctl().t());
-        nextPlannedComVel.z() = calcRefComZ(ctl().t(), 1) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 1);
-        plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
-      }
-    }
-
-    if(config().sinkActive_) {
-      const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
-      const double gamma = 0.7;                             // 反映率（0.5〜0.8推奨）
-      if(true) {
-        Foot swing = ctl().footManager_->swingFoot();
-        // “下げる”のでマイナス符号
-        ctl().footManager_->setNextLandingZOffset(swing, -gamma * delta_h);
-      }
-    }
-
     ctl().comTask_->com(nextPlannedCom);
     ctl().comTask_->refVel(nextPlannedComVel);
     ctl().comTask_->refAccel(plannedComAccel);
@@ -563,65 +501,6 @@ double CentroidalManager::calcRefComZ(double t, int derivOrder) const
   }
 }
 
-double CentroidalManager::getfootSurfaceDiff() const
-{
-  double footSurfaceDiff = 0.0;
-  int contactCount = 0;
-
-  // Get contact feet
-  contactCount = static_cast<int>(ctl().footManager_->getCurrentContactFeet().size());
-
-  // Is Robot on two feet?
-  if(contactCount == 2 || isDangerFloor == true)
-  {
-    const auto & leftSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Left));
-    const auto & rightSurfacePose = ctl().robot().surfacePose(ctl().footManager_->surfaceName(Foot::Right));
-    footSurfaceDiff = std::abs(leftSurfacePose.translation().z() - rightSurfacePose.translation().z());
-    return footSurfaceDiff;
-  }
-
-  return 0.0;
-}
-
-double CentroidalManager::compliantFloorCorrection(double footSurfaceDiff) const
-{
-  double comZ = actualCom().z();                         // 実際のCoM高さ
-  double comVelZ = ctl().realRobot().comVelocity().z();  // CoM速度Z
-
-  double plannedGroundZ = ctl().footManager_->calcRefGroundPosZ(ctl().t());
-  double supportZ = plannedGroundZ - footSurfaceDiff;
-  double relZ = comZ - supportZ;      // 床からの相対高さ
-  double relVelZ = comVelZ;
-
-  // 床の物理定数
-  const double K = config().floorSpringK;
-  const double D = config().floorDampingD;
-
-  // a = F/m = (K*Δz + D*Δẋ)/m
-  return (K * (-relZ) + D * (-relVelZ)) / robotMass_;
-}
-
-double CentroidalManager::estimateSupportSink() const
-{
-  // 実足の平均支持高さ
-  double supportZ = 0.0;
-  int n = 0;
-  for(const auto & foot : ctl().footManager_->getCurrentContactFeet())
-  {
-    supportZ += ctl().robot().surfacePose(ctl().footManager_->surfaceName(foot)).translation().z();
-    ++n;
-  }
-  if(n == 0) { return 0.0; }
-  supportZ /= static_cast<double>(n);
-
-  // 計画上の地面高さ（剛床前提の参照）
-  double plannedGroundZ = ctl().footManager_->calcRefGroundPosZ(ctl().t());
-  config().lastSupportZ_ = supportZ;
-
-  // 正なら「計画に対して実際の支持面が沈んだ」量
-  return plannedGroundZ - supportZ;
-}
-
 sva::PTransformd CentroidalManager::calcAnchorFrame(const mc_rbdyn::Robot & robot) const
 {
   double leftFootSupportRatio = ctl().footManager_->leftFootSupportRatio();
@@ -656,8 +535,6 @@ Eigen::Vector3d CentroidalManager::calcZmp(const std::unordered_map<Foot, sva::F
                                            const Eigen::Vector3d & zmpPlaneNormal) const
 {
   sva::ForceVecd totalWrench = sva::ForceVecd::Zero();
-
-  // モーメントの総和
   for(const auto & wrenchKV : wrenchList)
   {
     totalWrench += wrenchKV.second;

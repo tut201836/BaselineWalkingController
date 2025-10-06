@@ -113,18 +113,6 @@ public:
     //! Configuration for wrench distribution
     mc_rtc::Configuration wrenchDistConfig;
 
-    double floorSpringK;
-    double floorDampingD;
-
-    double sinkOnThreshold;
-    double sinkOffThreshold;
-    double sinkAlpha;
-    double sinkAccelScale;
-
-    mutable double footSurfaceDiffFilt_{0.0};
-    mutable bool sinkActive_{false};
-    mutable double lastSupportZ_{0.0}; // ログ/診断用にも
-
     //! Configuration for DCM estimator
     DcmEstimatorConfiguration dcmEstimatorConfig;
 
@@ -182,13 +170,6 @@ public:
 
   /** \brief Set anchor frame. */
   void setAnchorFrame();
-
-  /** \brief Set floor deff */
-  double compliantFloorCorrection(double footSurfaceZDiff) const;
-
-  double estimateSupportSink() const;
-
-  double getfootSurfaceDiff() const;
 
 protected:
   /** \brief Const accessor to the controller. */

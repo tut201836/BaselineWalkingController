@@ -104,23 +104,7 @@ public:
         \param mcRtcConfig mc_rtc configuration
     */
     void load(const mc_rtc::Configuration & mcRtcConfig);
-
   };
-
-  // --- landing Z offset control API ---
-  inline void setNextLandingZOffset(const Foot & foot, double dz)
-  {
-    landingZOffset_.at(foot) = dz;
-  }
-  inline void clearLandingZOffset(const Foot & foot)
-  {
-    landingZOffset_.at(foot) = 0.0;
-  }
-  inline double landingZOffset(const Foot & foot) const
-  {
-    return landingZOffset_.at(foot);
-  }
-
 
   /** \brief Velocity mode data.
 
@@ -332,18 +316,6 @@ public:
     return supportPhase_;
   }
 
-  /** \brief Return true if currently in single support (then the swing foot is the opposite of the support). */
-  inline bool singleSupport() const noexcept
-  {
-    return (supportPhase_ == SupportPhase::LeftSupport) || (supportPhase_ == SupportPhase::RightSupport);
-  }
-  /** \brief Get current swing foot (valid only in single support). */
-  inline Foot swingFoot() const
-  {
-    return (supportPhase_ == SupportPhase::LeftSupport) ? Foot::Right : Foot::Left;
-  }
-
-
   /** \brief Send footstep sequence to walk to the relative target pose.
       \param targetTrans relative target pose of foot midpose (x [m], y [m], theta [rad])
       \param lastFootstepNum number of last footstep
@@ -477,13 +449,5 @@ protected:
 
   //! Whether to require updating impedance gains for foot tasks
   bool requireImpGainUpdate_ = true;
-
-  // --- per-foot landing offsets ---
-  // Z: already added before
-  std::unordered_map<Foot, double> landingZOffset_ = {{Foot::Left,0.0},{Foot::Right,0.0}};
-
-  double worldGroundZ0_ = 0.0;        // リセット時の世界基準地面Z
-  double relevelDuration_ = 0.6;      // DS内での復帰時間（必要ならGUI化）
-  bool   keepWorldGroundBaseline_ = true; // trueなら常に世界基準Zを使用
 };
 } // namespace BWC
