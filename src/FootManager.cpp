@@ -768,22 +768,21 @@ void FootManager::updateFootTraj()
       {
         const sva::PTransformd & swingStartPose = ctl().robot().surfacePose(surfaceName(swingFootstep_->foot));
         sva::PTransformd swingEndPose = swingFootstep_->pose;
+        // --- apply landing offsets to end pose ---
+        // {
+        //   auto & t = swingEndPose.translation();
+        //   t.z() += landingZOffset_;
+        //   // mc_rtc::log::warning("landingZOffset_ : {}", landingZOffset_);
+        //   // clearLandingZOffset();
+        //   setNextLandingZOffset(t.z());
+
+        // }
         if(config_.overwriteLandingPose && prevFootstep_)
         {
           sva::PTransformd swingRelPose = swingFootstep_->pose * prevFootstep_->pose.inv();
           swingEndPose.translation() = (swingRelPose * targetFootPoses_.at(prevFootstep_->foot)).translation();
         }
-        // --- apply landing offsets to end pose ---
-        // {
-        //   auto & t = swingEndPose.translation();
-        //   // Z
-        //   // t.z() += landingZOffset_.at(swingFootstep_->foot);
-        //   clearLandingZOffset(swingFootstep_->foot);
-        //   mc_rtc::log::warning("swingEndPose.translation() : {}",t.z());
-
-        // }
-
-
+        
         std::string swingTrajType =
             swingFootstep_->swingTrajConfig("type", static_cast<std::string>(config_.defaultSwingTrajType));
         if(swingTrajType == "CubicSplineSimple")

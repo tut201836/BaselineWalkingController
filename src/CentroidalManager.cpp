@@ -183,17 +183,17 @@ void CentroidalManager::update()
     }
 
     // --- added: roll-rate damper to mitigate lateral sway ---
-    {
-      // ベースのロール角速度 ωx を取得（IMU/BodySensor 名は環境に合わせて）
-      // mc_rtc では realRobot().bodySensor() / robot().bodySensor() のどちらかを使用
-      const auto & bs = ctl().realRobot().bodySensor();
-      const double omega_roll = bs.angularVelocity().x(); // [rad/s], +は左肩上がり方向
-      // 係数（初期目安）
-      static const double k_roll_damp = 0.02; // [m / (rad/s)] 0.01〜0.03で調整
-      // ロールが左へ倒れる（ωx>0）時はZMPを左（+y）に寄せる ⇒ 符号は -?
-      // 右手系定義に依るが、多くのモデルで "ZMPをロール速度と逆向きに" が安定
-      controlZmp_.y() += -k_roll_damp * omega_roll;
-    }
+    // {
+    //   // ベースのロール角速度 ωx を取得（IMU/BodySensor 名は環境に合わせて）
+    //   // mc_rtc では realRobot().bodySensor() / robot().bodySensor() のどちらかを使用
+    //   const auto & bs = ctl().realRobot().bodySensor();
+    //   const double omega_roll = bs.angularVelocity().x(); // [rad/s], +は左肩上がり方向
+    //   // 係数（初期目安）
+    //   static const double k_roll_damp = 0.02; // [m / (rad/s)] 0.01〜0.03で調整
+    //   // ロールが左へ倒れる（ωx>0）時はZMPを左（+y）に寄せる ⇒ 符号は -?
+    //   // 右手系定義に依るが、多くのモデルで "ZMPをロール速度と逆向きに" が安定
+    //   controlZmp_.y() += -k_roll_damp * omega_roll;
+    // }
 
     // Apply ForceZ feedback
     if(config().enableComZFeedback)
@@ -251,12 +251,11 @@ void CentroidalManager::update()
       nextPlannedCom = mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
       nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
 
-      const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
-      const double gamma = 0.7;                             // 反映率（0.5〜0.8推奨）
-      if(true) {
-        // Foot swing = ctl().footManager_->swingFoot();
-        // ctl().footManager_->setNextLandingZOffset(swing, -gamma * delta_h);
-      }
+      // const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
+      // if(true) {
+      //   Foot swing = ctl().footManager_->swingFoot();
+      //   ctl().footManager_->setNextLandingZOffset(delta_h);
+      // }
     
     }
     // 通常の床

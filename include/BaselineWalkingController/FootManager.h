@@ -108,17 +108,17 @@ public:
   };
 
   // --- landing Z offset control API ---
-  inline void setNextLandingZOffset(const Foot & foot, double dz)
+  inline void setNextLandingZOffset(double dz)
   {
-    landingZOffset_.at(foot) = dz;
+    landingZOffset_ = dz;
   }
-  inline void clearLandingZOffset(const Foot & foot)
+  inline void clearLandingZOffset()
   {
-    landingZOffset_.at(foot) = 0.0;
+    landingZOffset_ = 0.0;
   }
-  inline double landingZOffset(const Foot & foot) const
+  inline double landingZOffset() const
   {
-    return landingZOffset_.at(foot);
+    return landingZOffset_;
   }
 
 
@@ -480,7 +480,7 @@ protected:
 
   // --- per-foot landing offsets ---
   // Z: already added before
-  std::unordered_map<Foot, double> landingZOffset_ = {{Foot::Left,0.0},{Foot::Right,0.0}};
+  double landingZOffset_ = 0.0;
 
   double worldGroundZ0_ = 0.0;        // リセット時の世界基準地面Z
   double relevelDuration_ = 0.6;      // DS内での復帰時間（必要ならGUI化）
