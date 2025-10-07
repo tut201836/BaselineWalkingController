@@ -485,5 +485,13 @@ protected:
   double worldGroundZ0_ = 0.0;        // リセット時の世界基準地面Z
   double relevelDuration_ = 0.6;      // DS内での復帰時間（必要ならGUI化）
   bool   keepWorldGroundBaseline_ = true; // trueなら常に世界基準Zを使用
+
+  // 次フレームで戻すべき「直前に加えたZ量」
+  std::array<double, 2> pendingLandingZToRevert_{0.0, 0.0};
+  // その差し戻しを実施するフレーム番号（tick_ がこれ以降になったら実施）
+  std::array<uint64_t, 2> revertAtTick_{0, 0};
+
+  // 制御ループの更新カウンタ（1ループで +1）
+  uint64_t tick_{0};
 };
 } // namespace BWC

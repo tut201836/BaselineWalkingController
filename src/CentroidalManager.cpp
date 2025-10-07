@@ -240,17 +240,24 @@ void CentroidalManager::update()
     // 沈む床を踏んだとき (今は使わない)
     if (config().sinkActive_)
     {
-      mc_rtc::log::warning("footSurfaceDiff: {}", footSurfaceDiff);
+      // mc_rtc::log::warning("footSurfaceDiff: {}", footSurfaceDiff);
       isDangerFloor = true;
       if(isConstantComZ())
       {
         plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
-        // plannedComAccel.z() += 0.001 * compliantFloorCorrection(footSurfaceDiff);
         plannedComAccel.z() += config().sinkAccelScale
                          * compliantFloorCorrection(config().footSurfaceDiffFilt_);
       }
       nextPlannedCom = mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
       nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
+
+      const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
+      const double gamma = 0.7;                             // 反映率（0.5〜0.8推奨）
+      if(true) {
+        // Foot swing = ctl().footManager_->swingFoot();
+        // ctl().footManager_->setNextLandingZOffset(swing, -gamma * delta_h);
+      }
+    
     }
     // 通常の床
     else
@@ -260,16 +267,6 @@ void CentroidalManager::update()
         nextPlannedCom.z() = calcRefComZ(ctl().t()) + ctl().footManager_->calcRefGroundPosZ(ctl().t());
         nextPlannedComVel.z() = calcRefComZ(ctl().t(), 1) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 1);
         plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
-      }
-    }
-
-    if(config().sinkActive_) {
-      const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
-      const double gamma = 0.7;                             // 反映率（0.5〜0.8推奨）
-      if(true) {
-        Foot swing = ctl().footManager_->swingFoot();
-        // “下げる”のでマイナス符号
-        ctl().footManager_->setNextLandingZOffset(swing, -gamma * delta_h);
       }
     }
 
