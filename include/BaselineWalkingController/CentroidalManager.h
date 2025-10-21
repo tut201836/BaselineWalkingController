@@ -113,6 +113,8 @@ public:
     //! Configuration for wrench distribution
     mc_rtc::Configuration wrenchDistConfig;
 
+    bool use_sink_algo;
+
     double floorSpringK;
     double floorDampingD;
 
@@ -298,5 +300,13 @@ protected:
 
   //! Whether to require to reset DCM estimator
   bool requireDcmEstimatorReset_ = true;
+
+      std::ofstream csv_;
+  bool csvHeaderWritten_ = false;
+  std::string csvPath_;
+
+  void openCsvIfNeeded();
+  void writeCsvHeader();
+  void writeCsvRow(double t);
 };
 } // namespace BWC

@@ -61,6 +61,8 @@ void CentroidalManager::Configuration::load(const mc_rtc::Configuration & mcRtcC
   mcRtcConfig("sinkOffThreshold", sinkOffThreshold); // default 0.006
   mcRtcConfig("sinkAlpha", sinkAlpha);               // LPF alpha (0..1), default 0.25
   mcRtcConfig("sinkAccelScale", sinkAccelScale);     // 既存の 0.001 を置換
+  mcRtcConfig("use_sink_algo", use_sink_algo);
+  
   dcmEstimatorConfig.load(mcRtcConfig("dcmEstimator", mc_rtc::Configuration()));
 }
 
@@ -87,6 +89,8 @@ void CentroidalManager::reset()
       Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(), dcmEstimatorConfig.initDcmUncertainty,
       dcmEstimatorConfig.initBiasUncertainty);
   requireDcmEstimatorReset_ = true;
+
+  openCsvIfNeeded();
 }
 
 void CentroidalManager::update()
@@ -182,19 +186,6 @@ void CentroidalManager::update()
       controlZmp_.head<2>() += config().dcmGainP * dcmError.head<2>();
     }
 
-    // --- added: roll-rate damper to mitigate lateral sway ---
-    // {
-    //   // ベースのロール角速度 ωx を取得（IMU/BodySensor 名は環境に合わせて）
-    //   // mc_rtc では realRobot().bodySensor() / robot().bodySensor() のどちらかを使用
-    //   const auto & bs = ctl().realRobot().bodySensor();
-    //   const double omega_roll = bs.angularVelocity().x(); // [rad/s], +は左肩上がり方向
-    //   // 係数（初期目安）
-    //   static const double k_roll_damp = 0.02; // [m / (rad/s)] 0.01〜0.03で調整
-    //   // ロールが左へ倒れる（ωx>0）時はZMPを左（+y）に寄せる ⇒ 符号は -?
-    //   // 右手系定義に依るが、多くのモデルで "ZMPをロール速度と逆向きに" が安定
-    //   controlZmp_.y() += -k_roll_damp * omega_roll;
-    // }
-
     // Apply ForceZ feedback
     if(config().enableComZFeedback)
     {
@@ -225,40 +216,27 @@ void CentroidalManager::update()
     // Set target of CoM task
     Eigen::Vector3d plannedComAccel = calcPlannedComAccel();
     Eigen::Vector3d nextPlannedCom =
-        mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
-    Eigen::Vector3d nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
-
-    double footSurfaceDiff = estimateSupportSink();
+        mpcCom_ + ctl().dt() * ctl().realRobot().comVelocity() + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
+    Eigen::Vector3d nextPlannedComVel = ctl().realRobot().comVelocity() + ctl().dt() * plannedComAccel;
 
     // LPF＋ヒステリシス
+    double footSurfaceDiff = estimateSupportSink();
     config().footSurfaceDiffFilt_ = config().sinkAlpha * footSurfaceDiff
-                                   + (1.0 - config().sinkAlpha) * config().footSurfaceDiffFilt_;
+                                  + (1.0 - config().sinkAlpha) * config().footSurfaceDiffFilt_;
     if(!config().sinkActive_ && config().footSurfaceDiffFilt_ > config().sinkOnThreshold)  config().sinkActive_ = true;
     else if(config().sinkActive_ && config().footSurfaceDiffFilt_ < config().sinkOffThreshold) config().sinkActive_ = false;
     isDangerFloor = config().sinkActive_;
-        
-    // 沈む床を踏んだとき (今は使わない)
-    if (config().sinkActive_)
+
+    if (config().sinkActive_ && config().use_sink_algo)
     {
-      // mc_rtc::log::warning("footSurfaceDiff: {}", footSurfaceDiff);
-      isDangerFloor = true;
+      mc_rtc::log::warning("footSurfaceDiff: {}", footSurfaceDiff);
       if(isConstantComZ())
       {
         plannedComAccel.z() = calcRefComZ(ctl().t(), 2) + ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
-        plannedComAccel.z() += config().sinkAccelScale
-                         * compliantFloorCorrection(config().footSurfaceDiffFilt_);
+        nextPlannedCom = mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
+        nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
       }
-      nextPlannedCom = mpcCom_ + ctl().dt() * mpcComVel_ + 0.5 * std::pow(ctl().dt(), 2) * plannedComAccel;
-      nextPlannedComVel = mpcComVel_ + ctl().dt() * plannedComAccel;
-
-      // const double delta_h = config().footSurfaceDiffFilt_; // [m]（正で沈み）
-      // if(true) {
-      //   Foot swing = ctl().footManager_->swingFoot();
-      //   ctl().footManager_->setNextLandingZOffset(delta_h);
-      // }
-    
     }
-    // 通常の床
     else
     {
       if(isConstantComZ())
@@ -305,12 +283,17 @@ void CentroidalManager::update()
     ctl().gui()->removeCategory({ctl().name(), config().name, "ForceMarker"});
     wrenchDist_->addToGUI(*ctl().gui(), {ctl().name(), config().name, "ForceMarker"});
   }
+
+  openCsvIfNeeded();
+  writeCsvHeader();
+  writeCsvRow(ctl().t());
 }
 
 void CentroidalManager::stop()
 {
   removeFromGUI(*ctl().gui());
   removeFromLogger(ctl().logger());
+  if(csv_.is_open()) csv_.close();
 }
 
 void CentroidalManager::addToGUI(mc_rtc::gui::StateBuilder & gui)
@@ -581,8 +564,8 @@ double CentroidalManager::getfootSurfaceDiff() const
 
 double CentroidalManager::compliantFloorCorrection(double footSurfaceDiff) const
 {
-  double comZ = actualCom().z();                         // 実際のCoM高さ
-  double comVelZ = ctl().realRobot().comVelocity().z();  // CoM速度Z
+  double comZ = calcRefComZ(ctl().t());
+  double comVelZ = calcRefComZ(ctl().t(), 1);
 
   double plannedGroundZ = ctl().footManager_->calcRefGroundPosZ(ctl().t());
   double supportZ = plannedGroundZ - footSurfaceDiff;
@@ -679,4 +662,165 @@ Eigen::Vector3d CentroidalManager::calcPlannedComAccel() const
       plannedForceZ_ / robotMass_;
   plannedComAccel.z() -= CCC::constants::g;
   return plannedComAccel;
+}
+
+// ==== 1) CSV を開く（初回のみ）====
+void CentroidalManager::openCsvIfNeeded()
+{
+  if(csv_.is_open()) return;
+
+  // 例: logs/centroidal_<name>_<method>_YYYYMMDD_HHMMSS.csv
+  // ※ 実環境のパスに合わせて適宜変更
+  char buf[64];
+  std::time_t tt = std::time(nullptr);
+  std::tm tm{};
+#ifdef _WIN32
+  localtime_s(&tm, &tt);
+#else
+  localtime_r(&tt, &tm);
+#endif
+  std::snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
+                tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+  // パラメータ識別子（ファイル名に少しだけ入れる）
+  std::ostringstream oss;
+  oss << "/userdir/chidori_LOG/csv_logs/centroidal_"
+      << config().name << "_" << config().method << "_" << buf << ".csv";
+  csvPath_ = oss.str();
+
+  csv_.open(csvPath_, std::ios::out);
+  csvHeaderWritten_ = false;
+}
+
+// ==== 2) 互換ヘッダ（固定列名・固定順）====
+void CentroidalManager::writeCsvHeader()
+{
+  if(csvHeaderWritten_) return;
+
+  // 必要に応じて列を足して OK。順序は固定すること。
+  csv_
+    // ---- meta / config（毎行に埋める）----
+    << "run_name" << ","     // config().name
+    << "method" << ","
+    << "floorSpringK" << ","
+    << "floorDampingD" << ","
+    << "sinkOnThreshold" << ","
+    << "sinkOffThreshold" << ","
+    << "sinkAlpha" << ","
+    << "sinkAccelScale" << ","
+    << "use_sink_algo" << ","
+    // ---- time ----
+    << "t" << ","
+    // ---- vertical / support ----
+    << "com_z" << ","
+    << "com_dz" << ","
+    << "com_plan_ddz" << ","
+    << "ground_z_ref" << ","
+    << "ground_dz_ref" << ","
+    << "ground_ddz_ref" << ","
+    << "support_z_meas" << ","        // 実支持平均（estimateSupportSink から）
+    << "foot_surface_diff" << ","     // 左右差
+    << "foot_surface_diff_filt" << ","// LPF後
+    << "sink_active" << ","
+    // 相対量 & 係数
+    << "h" << ","                      // com_z - support_z
+    << "dh" << ","
+    << "omega" << ","                  // sqrt((g+ddz_s)/h)
+    << "alpha" << ","                  // 2*dh/h
+    // ---- ZMP / DCM / CoP margin（横方向安定）----
+    << "zmp_ref_x" << "," << "zmp_ref_y" << ","
+    << "zmp_meas_x" << "," << "zmp_meas_y" << ","
+    << "zmp_plan_x" << "," << "zmp_plan_y" << ","
+    << "zmp_ctrl_x" << "," << "zmp_ctrl_y" << ","
+    << "cop_support_min_x" << "," << "cop_support_min_y" << ","
+    << "cop_support_max_x" << "," << "cop_support_max_y" << ","
+    // DCM 誤差ノルム（水平2D）
+    << "dcm_err_norm"
+    << "\n";
+
+  csvHeaderWritten_ = true;
+}
+
+// ==== 3) 1 行出力 ====
+void CentroidalManager::writeCsvRow(double t)
+{
+  // ---- 前提: update() の末尾付近で呼ぶ。必要量をここで計算 ----
+  // 実支持平均 Z（estimateSupportSink 内で lastSupportZ_ に保存済）
+  double supportZ_meas = config().lastSupportZ_;
+  // 参照の地面（剛床モデル）
+  double gz   = ctl().footManager_->calcRefGroundPosZ(ctl().t());
+  double gdz  = ctl().footManager_->calcRefGroundPosZ(ctl().t(), 1);
+  double gddz = ctl().footManager_->calcRefGroundPosZ(ctl().t(), 2);
+
+  double cz   = ctl().comTask_->com().z();            // 計画 CoM z
+  double cdz  = ctl().comTask_->refVel().z();
+  double cddz = ctl().comTask_->refAccel().z();       // plannedComAccel.z()
+
+  // 相対量
+  double h  = cz - supportZ_meas;
+  double dh = cdz; // supportZ_meas は低速変化とみなすなら cdz - d(supportZ)
+                   // 実測の d(supportZ) を入れたければ面倒だが差分で推定も可
+
+  // 係数
+  constexpr double g = 9.80665;
+  double omega = (h > 1e-4) ? std::sqrt(std::max(0.0, (g + gddz) / h)) : 0.0;
+  double alpha = (h > 1e-4) ? 2.0 * (dh / h) : 0.0;
+
+  // DCM 誤差（水平2D）
+  Eigen::Vector3d plannedDcm, actualDcm;
+  {
+    // update() 内の ZMP/ForceZ フィードバックと同じ ω を使うなら再計算しても OK
+    double omega_xy = std::sqrt(plannedForceZ_ / (robotMass_ * (mpcCom_.z() - refZmp_.z())));
+    plannedDcm = ctl().comTask_->com() + ctl().comTask_->refVel() / omega_xy;
+    actualDcm  = actualCom()            + ctl().realRobot().comVelocity() / omega_xy;
+  }
+  double dcmErrNorm = (actualDcm.head<2>() - plannedDcm.head<2>()).norm();
+
+  // CoP 支持領域端
+  Eigen::Vector2d smin = supportRegion_[0];
+  Eigen::Vector2d smax = supportRegion_[1];
+
+  // foot surface 差分
+  double footSurfaceDiff = getfootSurfaceDiff();
+
+  // ---- 出力 ----
+  csv_
+    // meta/config（毎行）
+    << config().name << ","
+    << config().method << ","
+    << config().floorSpringK << ","
+    << config().floorDampingD << ","
+    << config().sinkOnThreshold << ","
+    << config().sinkOffThreshold << ","
+    << config().sinkAlpha << ","
+    << config().sinkAccelScale << ","
+    << (config().use_sink_algo ? 1 : 0) << ","
+    // time
+    << t << ","
+    // vertical/support
+    << cz << ","
+    << cdz << ","
+    << cddz << ","
+    << gz << ","
+    << gdz << ","
+    << gddz << ","
+    << supportZ_meas << ","
+    << footSurfaceDiff << ","
+    << config().footSurfaceDiffFilt_ << ","
+    << (config().sinkActive_ ? 1 : 0) << ","
+    // h/coeff
+    << h << ","
+    << dh << ","
+    << omega << ","
+    << alpha << ","
+    // ZMP/DCM/CoP
+    << refZmp_.x() << "," << refZmp_.y() << ","
+    << measuredZMP_.x() << "," << measuredZMP_.y() << ","
+    << plannedZmp_.x() << "," << plannedZmp_.y() << ","
+    << controlZmp_.x() << "," << controlZmp_.y() << ","
+    << smin.x() << "," << smin.y() << ","
+    << smax.x() << "," << smax.y() << ","
+    << dcmErrNorm
+    << "\n";
 }
